@@ -1,0 +1,17 @@
+# Web Server (Backend)
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+
+# YouTube Download
+yt-dlp>=2024.0.0
+
+# AI & Speech Recognition
+openai>=1.10.0
+openai-whisper>=20231117
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# Utilities
+pathlib2>=2.3.0;python_version<"3.4"
+python-dotenv>=1.0.0

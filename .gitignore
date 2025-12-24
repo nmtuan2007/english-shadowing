@@ -1,0 +1,23 @@
+# Environment Variables (IMPORTANT: Never commit .env)
+.env
+.env.local
+.venv
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# IDE
+.vscode/
+.idea/
+
+# Shadowing Content (Don't commit heavy video/audio files)
+# We keep the directory structure but ignore the actual media content
+lessons/**/*.mp4
+lessons/**/*.mp3
+lessons/**/*.wav
+
+# If you want to ignore all generated lessons completely, uncomment the line below:
+lessons/
