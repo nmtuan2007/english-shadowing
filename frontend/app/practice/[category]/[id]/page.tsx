@@ -6,8 +6,25 @@ import {
   ChevronLeft, RotateCcw, CheckCircle,
   BookOpen, MessageCircle, Volume2,
   Maximize2, Minimize2, Loader2, Music, AlertCircle,
-  DownloadCloud, FileAudio, Cpu
+  DownloadCloud, FileAudio, Cpu, Plus, X, Trash2, Search,
+  Mic, Square, Activity
 } from 'lucide-react';
+
+// --- TYPES ---
+interface VocabItem {
+  id: string;
+  word: string;
+  definition: string;
+  translation: string;
+  ipa: string;
+  context: string;
+  type: string;
+}
+
+interface ScoreResult {
+  score: number;
+  transcript: string;
+}
 
 export default function PracticeRoom() {
   const params = useParams();
@@ -17,7 +34,11 @@ export default function PracticeRoom() {
   const category = Array.isArray(params.category) ? params.category[0] : params.category;
   const id = Array.isArray(params.id) ? params.id[0] : params.id;
 
+  // Data State
   const [data, setData] = useState<any>(null);
+  const [vocabList, setVocabList] = useState<VocabItem[]>([]);
+  
+  // UI State
   const [tab, setTab] = useState<'transcript' | 'vocab'>('transcript');
   const [showVi, setShowVi] = useState(false);
   const [showGuide, setShowGuide] = useState(true);
@@ -26,10 +47,22 @@ export default function PracticeRoom() {
   const [activeIndex, setActiveIndex] = useState(-1);
   const [isLoading, setIsLoading] = useState(true);
 
+  // Definition State
+  const [selection, setSelection] = useState<{ text: string; context: string } | null>(null);
+  const [definition, setDefinition] = useState<VocabItem | null>(null);
+  const [isDefining, setIsDefining] = useState(false);
+
+  // Recording State
+  const [recordingId, setRecordingId] = useState<number | null>(null);
+  const [isProcessingAudio, setIsProcessingAudio] = useState(false);
+  const [scores, setScores] = useState<Record<number, ScoreResult>>({});
+  
   const videoRef = useRef<HTMLVideoElement>(null);
   const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<BlobPart[]>([]);
 
-  // Polling for data
+  // 1. Poll for Lesson Data
   useEffect(() => {
     if (!category || !id) return;
 
@@ -43,7 +76,6 @@ export default function PracticeRoom() {
           setData(d);
           setIsLoading(false);
 
-          // Poll if in any processing state
           if (['downloading', 'transcribing', 'generating_ai'].includes(d.status)) {
             setTimeout(fetchData, 3000);
           }
@@ -62,15 +94,31 @@ export default function PracticeRoom() {
       if (lesson?.done) setIsDone(true);
     });
 
+    // Fetch Vocabulary
+    fetchVocab();
+
     return () => { isMounted = false; };
   }, [category, id]);
 
-  // Sync Transcript
+  const fetchVocab = async () => {
+    try {
+      const res = await fetch(`http://localhost:8000/api/vocab?lesson_id=${id}`);
+      const list = await res.json();
+      setVocabList(list);
+    } catch (e) {
+      console.error("Failed to fetch vocab", e);
+    }
+  };
+
+  // 2. Sync Transcript with Video
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !data?.transcript) return;
 
     const handleTimeUpdate = () => {
+      // Don't auto-scroll if user is recording or selecting text
+      if (recordingId !== null || selection !== null) return;
+
       const time = video.currentTime;
       const index = data.transcript.findIndex((s: any) => time >= s.start && time <= s.end);
 
@@ -85,7 +133,9 @@ export default function PracticeRoom() {
 
     video.addEventListener('timeupdate', handleTimeUpdate);
     return () => video.removeEventListener('timeupdate', handleTimeUpdate);
-  }, [data, activeIndex]);
+  }, [data, activeIndex, recordingId, selection]);
+
+  // --- ACTIONS ---
 
   const seekTo = (time: number) => {
     if (videoRef.current) {
@@ -114,7 +164,147 @@ export default function PracticeRoom() {
     mutate('http://localhost:8000/api/lessons');
   };
 
-  // --- LOADING / PROCESSING STATES ---
+  // --- RECORDING HANDLERS ---
+
+  const startRecording = async (index: number) => {
+    try {
+      // If already recording another segment, stop it first
+      if (recordingId !== null && mediaRecorderRef.current) {
+         mediaRecorderRef.current.stop();
+      }
+
+      // Stop video playback to focus on voice
+      if (videoRef.current) videoRef.current.pause();
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      chunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+
+      mediaRecorder.onstop = async () => {
+        setIsProcessingAudio(true);
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+        const file = new File([blob], "recording.webm", { type: 'audio/webm' });
+        
+        // Prepare data
+        const targetText = data.transcript[index].en;
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("target_text", targetText);
+
+        try {
+          const res = await fetch("http://localhost:8000/api/score", {
+            method: "POST",
+            body: formData,
+          });
+          const result = await res.json();
+          if (result.status === 'success') {
+            setScores(prev => ({ ...prev, [index]: { score: result.score, transcript: result.transcript } }));
+          } else {
+            alert("Scoring failed: " + result.message);
+          }
+        } catch (err) {
+          console.error(err);
+          alert("Failed to send audio");
+        } finally {
+          setIsProcessingAudio(false);
+          setRecordingId(null);
+          stream.getTracks().forEach(track => track.stop()); // Release mic
+        }
+      };
+
+      mediaRecorder.start();
+      setRecordingId(index);
+
+    } catch (err) {
+      console.error(err);
+      alert("Microphone access denied or not available.");
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.stop();
+    }
+  };
+
+  // --- VOCABULARY HANDLERS ---
+
+  const handleTextSelection = (contextSentence: string) => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return;
+
+    const text = sel.toString().trim();
+    if (text.length > 0 && text.split(' ').length <= 4) { 
+      setSelection({ text, context: contextSentence });
+    }
+  };
+
+  const lookupDefinition = async () => {
+    if (!selection) return;
+    setIsDefining(true);
+    setDefinition(null);
+
+    try {
+      const res = await fetch('http://localhost:8000/api/define', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: selection.text, context: selection.context })
+      });
+      const data = await res.json();
+      setDefinition({
+        id: "", 
+        word: selection.text,
+        context: selection.context,
+        ...data
+      });
+    } catch (e) {
+      alert("Failed to get definition");
+    } finally {
+      setIsDefining(false);
+    }
+  };
+
+  const saveVocabulary = async () => {
+    if (!definition) return;
+    try {
+      const res = await fetch('http://localhost:8000/api/vocab', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lesson_id: id,
+          ...definition
+        })
+      });
+      const result = await res.json();
+      if (result.status === 'success') {
+        setVocabList(prev => [result.data, ...prev]);
+        setSelection(null);
+        setDefinition(null);
+        alert("Word saved!");
+      } else if (result.status === 'already_saved') {
+        alert("Word already saved.");
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const deleteVocabulary = async (vocabId: string) => {
+    if (!confirm("Remove this word?")) return;
+    try {
+      await fetch(`http://localhost:8000/api/vocab/${vocabId}`, { method: 'DELETE' });
+      setVocabList(prev => prev.filter(v => v.id !== vocabId));
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  // --- LOADING / PROCESSING UI ---
 
   if (isLoading) return (
     <div className="h-screen flex items-center justify-center bg-white dark:bg-slate-950">
@@ -125,37 +315,11 @@ export default function PracticeRoom() {
   const status = data?.status;
 
   if (['downloading', 'transcribing', 'generating_ai'].includes(status)) {
-    let icon = <Loader2 className="animate-spin text-brand-600" size={60} />;
-    let text = "Processing...";
-    let subtext = "Please wait.";
-
-    if (status === 'downloading') {
-      icon = <DownloadCloud className="animate-bounce text-blue-500" size={60} />;
-      text = "Downloading Video";
-      subtext = "Fetching content from YouTube...";
-    } else if (status === 'transcribing') {
-      icon = <FileAudio className="animate-pulse text-purple-500" size={60} />;
-      text = "Transcribing Audio";
-      subtext = "Extracting text timestamps...";
-    } else if (status === 'generating_ai') {
-      icon = <Cpu className="animate-spin text-amber-500" size={60} />;
-      text = "AI Processing";
-      subtext = "Generating translations and shadowing guides...";
-    }
-
     return (
       <div className="h-screen flex flex-col items-center justify-center bg-white dark:bg-slate-950 space-y-6">
-        <div className="relative">
-          <div className="absolute inset-0 bg-slate-200 blur-xl opacity-20"></div>
-          <div className="relative z-10">{icon}</div>
-        </div>
-        <div className="text-center space-y-2">
-          <h2 className="text-xl font-black text-slate-800 dark:text-white uppercase tracking-tight">{text}</h2>
-          <p className="text-slate-400 text-sm font-medium">{subtext}</p>
-        </div>
-        <button onClick={() => router.back()} className="text-xs font-bold text-slate-400 hover:text-brand-600">
-          Go Back
-        </button>
+        <Loader2 className="animate-spin text-brand-600" size={60} />
+        <h2 className="text-xl font-black text-slate-800 dark:text-white uppercase tracking-tight">Processing...</h2>
+        <button onClick={() => router.back()} className="text-xs font-bold text-slate-400 hover:text-brand-600">Go Back</button>
       </div>
     );
   }
@@ -164,17 +328,63 @@ export default function PracticeRoom() {
     <div className="h-screen flex flex-col items-center justify-center bg-white dark:bg-slate-950 space-y-4">
       <AlertCircle className="text-rose-500" size={60} />
       <h2 className="text-xl font-black text-slate-800 dark:text-white uppercase">Lesson Not Ready</h2>
-      <p className="text-slate-400">This lesson has not been generated yet.</p>
-      <button onClick={() => router.back()} className="px-6 py-3 bg-slate-100 dark:bg-slate-800 rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-slate-200">
-        Back to Dashboard
-      </button>
+      <button onClick={() => router.back()} className="px-6 py-3 bg-slate-100 dark:bg-slate-800 rounded-2xl text-xs font-black uppercase tracking-widest">Back to Dashboard</button>
     </div>
   );
 
-  // --- MAIN UI ---
+  // --- MAIN RENDER ---
 
   return (
-    <div className="flex flex-col h-screen bg-white dark:bg-slate-950 overflow-hidden font-sans">
+    <div className="flex flex-col h-screen bg-white dark:bg-slate-950 overflow-hidden font-sans relative">
+
+      {/* DEFINITION MODAL */}
+      {selection && (
+        <div className="absolute inset-0 z-[100] bg-black/50 backdrop-blur-sm flex items-center justify-center p-6">
+          <div className="bg-white dark:bg-slate-900 w-full max-w-md rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+            {!definition ? (
+              <div className="p-8 text-center space-y-6">
+                <h3 className="text-lg font-bold text-slate-500">Look up definition?</h3>
+                <div className="text-2xl font-black text-brand-600 dark:text-brand-400">"{selection.text}"</div>
+                <div className="flex gap-3 justify-center">
+                   <button onClick={() => setSelection(null)} className="px-6 py-3 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-500 font-bold text-sm">Cancel</button>
+                  <button onClick={lookupDefinition} disabled={isDefining} className="px-6 py-3 rounded-xl bg-brand-600 text-white font-bold text-sm flex items-center gap-2">
+                    {isDefining ? <Loader2 className="animate-spin" size={16}/> : <Search size={16}/>} Define
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col">
+                 <div className="p-6 bg-brand-50 dark:bg-slate-800/50 border-b border-slate-100 dark:border-slate-800 flex justify-between items-start">
+                    <div>
+                      <h2 className="text-2xl font-black text-slate-900 dark:text-white">{definition.word}</h2>
+                      <div className="flex items-center gap-3 mt-1 text-slate-500">
+                        <span className="font-mono text-sm">/{definition.ipa}/</span>
+                        <span className="text-xs font-bold uppercase bg-slate-200 dark:bg-slate-700 px-2 py-0.5 rounded">{definition.type}</span>
+                        <button onClick={() => speakText(definition.word)}><Volume2 size={16} className="text-brand-600 hover:scale-110 transition-transform"/></button>
+                      </div>
+                    </div>
+                    <button onClick={() => { setSelection(null); setDefinition(null); }}><X className="text-slate-400 hover:text-slate-600"/></button>
+                 </div>
+                 <div className="p-6 space-y-4">
+                    <div>
+                      <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Meaning</label>
+                      <p className="text-slate-700 dark:text-slate-300 font-medium">{definition.definition}</p>
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Vietnamese</label>
+                      <p className="text-brand-600 dark:text-brand-400 font-bold text-lg">{definition.translation}</p>
+                    </div>
+                 </div>
+                 <div className="p-4 border-t border-slate-100 dark:border-slate-800">
+                    <button onClick={saveVocabulary} className="w-full py-4 bg-slate-900 dark:bg-white text-white dark:text-slate-900 rounded-2xl font-black uppercase tracking-widest hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-2">
+                      <Plus size={18} /> Save to Vocabulary
+                    </button>
+                 </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* NAVIGATION BAR */}
       <nav className="flex items-center justify-between px-6 py-3 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 z-50">
@@ -189,15 +399,10 @@ export default function PracticeRoom() {
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => setIsTheaterMode(!isTheaterMode)}
-            className={`p-2.5 rounded-xl transition-all ${isTheaterMode ? 'bg-brand-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}
-          >
+          <button onClick={() => setIsTheaterMode(!isTheaterMode)} className={`p-2.5 rounded-xl transition-all ${isTheaterMode ? 'bg-brand-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
             {isTheaterMode ? <Minimize2 size={20} /> : <Maximize2 size={20} />}
           </button>
-
           <div className="h-6 w-[1px] bg-slate-200 dark:bg-slate-800 mx-1"></div>
-
           <button onClick={() => setShowGuide(!showGuide)} className={`px-4 py-2 rounded-xl text-[10px] font-black tracking-widest transition-all ${showGuide ? 'bg-amber-500 text-white shadow-md' : 'bg-slate-100 dark:bg-slate-800 text-slate-400'}`}>GUIDE</button>
           <button onClick={() => setShowVi(!showVi)} className={`px-4 py-2 rounded-xl text-[10px] font-black tracking-widest transition-all ${showVi ? 'bg-brand-600 text-white shadow-md' : 'bg-slate-100 dark:bg-slate-800 text-slate-400'}`}>TRANS</button>
           <button onClick={toggleDone} className={`p-2.5 rounded-xl transition-all ${isDone ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-200' : 'bg-slate-100 dark:bg-slate-800 text-slate-400'}`}>
@@ -213,69 +418,170 @@ export default function PracticeRoom() {
           <video ref={videoRef} src={data.video_url} controls className="w-full h-full max-h-full" playsInline />
         </div>
 
-        {/* TRANSCRIPT SECTION */}
+        {/* SIDEBAR SECTION */}
         <div className={`flex flex-col bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 transition-all ${isTheaterMode ? 'flex-1' : 'w-full lg:w-2/5 xl:w-1/3'}`}>
           <div className="flex border-b border-slate-200 dark:border-slate-800">
             <button onClick={() => setTab('transcript')} className={`flex-1 py-4 text-xs font-black uppercase tracking-widest transition-all ${tab === 'transcript' ? 'text-brand-600 bg-brand-50/50 dark:bg-brand-900/10 border-b-2 border-brand-600' : 'text-slate-400 hover:text-slate-600'}`}>
               <div className="flex items-center justify-center gap-2"><MessageCircle size={16} /> Transcript</div>
             </button>
             <button onClick={() => setTab('vocab')} className={`flex-1 py-4 text-xs font-black uppercase tracking-widest transition-all ${tab === 'vocab' ? 'text-brand-600 bg-brand-50/50 dark:bg-brand-900/10 border-b-2 border-brand-600' : 'text-slate-400 hover:text-slate-600'}`}>
-              <div className="flex items-center justify-center gap-2"><BookOpen size={16} /> Vocabulary</div>
+              <div className="flex items-center justify-center gap-2">
+                <BookOpen size={16} /> Vocabulary 
+                {vocabList.length > 0 && <span className="bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded-full text-[9px]">{vocabList.length}</span>}
+              </div>
             </button>
           </div>
 
           <div className="flex-1 overflow-y-auto p-4 space-y-4 scroll-smooth">
             {tab === 'transcript' ? (
-              data.transcript.map((item: any, idx: number) => (
-                <div
-                  key={idx}
-                  ref={(el) => { itemRefs.current[idx] = el; }}
-                  onClick={() => seekTo(item.start)}
-                  className={`relative p-6 rounded-[2rem] border-2 transition-all duration-300 cursor-pointer ${activeIndex === idx
-                    ? 'bg-brand-50 border-brand-500 dark:bg-slate-800 dark:border-brand-500 shadow-xl shadow-brand-500/10 scale-[1.02] z-10'
-                    : 'bg-slate-50/50 dark:bg-slate-800/30 border-transparent opacity-75 hover:opacity-100 hover:bg-slate-100 dark:hover:bg-slate-800'
+              // --- TRANSCRIPT TAB ---
+              data.transcript.map((item: any, idx: number) => {
+                const isRecording = recordingId === idx;
+                const scoreData = scores[idx];
+                const isActive = activeIndex === idx;
+
+                return (
+                  <div
+                    key={idx}
+                    ref={(el) => { itemRefs.current[idx] = el; }}
+                    className={`relative p-6 rounded-[2rem] border-2 transition-all duration-300 ${
+                      isRecording 
+                        ? 'bg-rose-50 border-rose-500 shadow-xl scale-[1.02] z-20' 
+                        : isActive
+                          ? 'bg-brand-50 border-brand-500 dark:bg-slate-800 dark:border-brand-500 shadow-xl shadow-brand-500/10 scale-[1.02] z-10'
+                          : 'bg-slate-50/50 dark:bg-slate-800/30 border-transparent opacity-75 hover:opacity-100 hover:bg-slate-100 dark:hover:bg-slate-800'
                     }`}
-                >
-                  <div className="flex justify-between items-start gap-4">
-                    <p className={`text-xl font-extrabold leading-tight tracking-tight ${activeIndex === idx
-                      ? 'text-slate-950 dark:text-white'
-                      : 'text-slate-700 dark:text-slate-300'
-                      }`}>
-                      {item.en}
-                    </p>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); speakText(item.en); }}
-                      className={`p-2 rounded-xl transition-all ${activeIndex === idx ? 'bg-brand-600 text-white' : 'bg-white dark:bg-slate-700 text-slate-400 shadow-sm'}`}
-                    >
-                      <Volume2 size={18} />
-                    </button>
-                  </div>
+                  >
+                    <div className="flex justify-between items-start gap-4 mb-2">
+                      <p 
+                        className={`text-xl font-extrabold leading-tight tracking-tight cursor-text select-text ${isActive ? 'text-slate-950 dark:text-white' : 'text-slate-700 dark:text-slate-300'}`}
+                        onMouseUp={() => handleTextSelection(item.en)}
+                      >
+                        {item.en}
+                      </p>
+                      
+                      <div className="flex flex-col gap-2 flex-shrink-0">
+                         {/* SPEAKER BUTTON */}
+                         <button
+                            onClick={(e) => { e.stopPropagation(); speakText(item.en); }}
+                            className={`p-2 rounded-xl transition-all ${isActive ? 'bg-brand-600 text-white' : 'bg-white dark:bg-slate-700 text-slate-400 shadow-sm'}`}
+                          >
+                            <Volume2 size={18} />
+                          </button>
 
-                  {showVi && (
-                    <p className={`text-base font-medium mt-3 border-t pt-3 border-slate-200 dark:border-slate-700 ${activeIndex === idx ? 'text-brand-700 dark:text-brand-400' : 'text-slate-400'
-                      }`}>
-                      {item.vi}
-                    </p>
-                  )}
-
-                  {showGuide && item.guide && (
-                    <div className={`mt-4 p-4 rounded-2xl border font-mono text-sm leading-relaxed transition-all ${activeIndex === idx
-                      ? 'bg-amber-50 border-amber-200 text-amber-900 dark:bg-amber-900/20 dark:border-amber-900/50 dark:text-amber-200 shadow-inner'
-                      : 'bg-white dark:bg-slate-800 border-slate-100 dark:border-slate-700 text-slate-400'
-                      }`}>
-                      <div className="flex items-center gap-2 opacity-50 mb-2">
-                        <Music size={14} /> <span className="text-[10px] font-black uppercase tracking-widest">Shadowing Guide</span>
+                          {/* MIC BUTTON */}
+                          <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                if (isRecording) stopRecording();
+                                else startRecording(idx);
+                            }}
+                            disabled={isProcessingAudio && recordingId === idx}
+                            className={`p-2 rounded-xl transition-all flex items-center justify-center ${
+                                isRecording 
+                                  ? 'bg-rose-500 text-white animate-pulse' 
+                                  : 'bg-white dark:bg-slate-700 text-slate-400 hover:text-rose-500 shadow-sm'
+                            }`}
+                          >
+                            {isProcessingAudio && recordingId === idx ? (
+                                <Loader2 className="animate-spin" size={18}/> 
+                            ) : isRecording ? (
+                                <Square size={18} fill="currentColor" />
+                            ) : (
+                                <Mic size={18} />
+                            )}
+                          </button>
                       </div>
-                      {item.guide}
                     </div>
-                  )}
-                </div>
-              ))
+
+                    {/* SCORE RESULT */}
+                    {scoreData && (
+                        <div className={`mt-3 p-3 rounded-xl border-l-4 text-sm animate-in fade-in slide-in-from-top-2 ${
+                            scoreData.score >= 80 ? 'bg-emerald-50 border-emerald-500' :
+                            scoreData.score >= 50 ? 'bg-amber-50 border-amber-500' :
+                            'bg-rose-50 border-rose-500'
+                        }`}>
+                            <div className="flex items-center justify-between mb-1">
+                                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">You said:</span>
+                                <span className={`text-xs font-black px-2 py-0.5 rounded-full ${
+                                    scoreData.score >= 80 ? 'bg-emerald-100 text-emerald-700' :
+                                    scoreData.score >= 50 ? 'bg-amber-100 text-amber-700' :
+                                    'bg-rose-100 text-rose-700'
+                                }`}>
+                                    {Math.round(scoreData.score)}% Match
+                                </span>
+                            </div>
+                            <p className="text-slate-700 italic">"{scoreData.transcript}"</p>
+                        </div>
+                    )}
+
+                    {showVi && (
+                      <p className={`text-base font-medium mt-3 border-t pt-3 border-slate-200 dark:border-slate-700 ${isActive ? 'text-brand-700 dark:text-brand-400' : 'text-slate-400'}`}>
+                        {item.vi}
+                      </p>
+                    )}
+
+                    {showGuide && item.guide && (
+                      <div className={`mt-4 p-4 rounded-2xl border font-mono text-sm leading-relaxed transition-all ${isActive
+                        ? 'bg-amber-50 border-amber-200 text-amber-900 dark:bg-amber-900/20 dark:border-amber-900/50 dark:text-amber-200 shadow-inner'
+                        : 'bg-white dark:bg-slate-800 border-slate-100 dark:border-slate-700 text-slate-400'
+                        }`}>
+                        <div className="flex items-center gap-2 opacity-50 mb-2">
+                          <Music size={14} /> <span className="text-[10px] font-black uppercase tracking-widest">Shadowing Guide</span>
+                        </div>
+                        {item.guide}
+                      </div>
+                    )}
+                    
+                    <div 
+                      className="absolute inset-0 z-0 cursor-pointer" 
+                      onClick={() => {
+                          if (window.getSelection()?.toString().length === 0) seekTo(item.start);
+                      }}
+                    />
+                    <div className="relative z-10 pointer-events-none"></div>
+                  </div>
+                );
+              })
             ) : (
-              <div className="flex flex-col items-center justify-center h-full text-slate-400 text-center p-10">
-                <BookOpen size={48} className="mb-4 opacity-20" />
-                <p className="font-black uppercase tracking-widest text-xs">Vocabulary list coming soon...</p>
-              </div>
+              // --- VOCABULARY TAB ---
+              vocabList.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full text-slate-400 text-center p-10 space-y-4">
+                  <div className="w-16 h-16 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center">
+                     <BookOpen size={32} className="opacity-50" />
+                  </div>
+                  <div>
+                    <p className="font-black uppercase tracking-widest text-xs mb-1">No words saved yet</p>
+                    <p className="text-sm">Double-click any word in the transcript to define and save it.</p>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {vocabList.map((v) => (
+                    <div key={v.id} className="bg-white dark:bg-slate-800 p-5 rounded-[1.5rem] border border-slate-100 dark:border-slate-700 shadow-sm group hover:border-brand-200 dark:hover:border-brand-900 transition-all">
+                      <div className="flex justify-between items-start mb-2">
+                        <div>
+                           <h3 className="text-lg font-black text-slate-900 dark:text-white">{v.word}</h3>
+                           <div className="flex items-center gap-2 text-slate-500 text-sm">
+                             <span className="font-mono">/{v.ipa}/</span>
+                             <button onClick={() => speakText(v.word)} className="hover:text-brand-600"><Volume2 size={14}/></button>
+                           </div>
+                        </div>
+                        <button onClick={() => deleteVocabulary(v.id)} className="p-2 text-slate-300 hover:text-rose-500 transition-colors">
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                      <div className="space-y-2">
+                        <p className="text-slate-600 dark:text-slate-300 text-sm font-medium">{v.definition}</p>
+                        <p className="text-brand-600 dark:text-brand-400 font-bold text-sm">{v.translation}</p>
+                      </div>
+                      <div className="mt-3 pt-3 border-t border-slate-50 dark:border-slate-700">
+                        <p className="text-xs text-slate-400 italic truncate">"{v.context}"</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )
             )}
           </div>
         </div>

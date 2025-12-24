@@ -10,7 +10,7 @@ __pycache__/
 *.py[cod]
 
 # IDE
-.vscode/
+#.vscode/
 .idea/
 
 # Shadowing Content (Don't commit heavy video/audio files)
